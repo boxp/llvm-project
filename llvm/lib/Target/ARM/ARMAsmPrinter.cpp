@@ -39,6 +39,7 @@
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/CodeGen/StackMaps.h"
 #include "llvm/Support/ARMBuildAttributes.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Debug.h"
@@ -2013,6 +2014,15 @@ void ARMAsmPrinter::emitInstruction(const MachineInstr *MI) {
   case ARM::KCFI_CHECK_Thumb1:
     LowerKCFI_CHECK(*MI);
     return;
+
+  case TargetOpcode::STACKMAP:
+    return LowerSTACKMAP(*OutStreamer, SM, *MI);
+
+  case TargetOpcode::PATCHPOINT:
+    return LowerPATCHPOINT(*OutStreamer, SM, *MI);
+
+  case TargetOpcode::STATEPOINT:
+    return LowerSTATEPOINT(*OutStreamer, SM, *MI);
   case ARM::LEApcrel:
   case ARM::tLEApcrel:
   case ARM::t2LEApcrel: {
@@ -2963,6 +2973,207 @@ void ARMAsmPrinter::emitInstruction(const MachineInstr *MI) {
   LowerARMMachineInstrToMCInst(MI, TmpInst, *this);
 
   EmitToStreamer(*OutStreamer, TmpInst);
+}
+
+//===----------------------------------------------------------------------===//
+// Statepoint / StackMap / PatchPoint lowering for ARM32
+// These enable GraalVM's LLVM backend (-H:CompilerBackend=llvm) on ARM32.
+// The implementation follows the AArch64 pattern with ARM32-specific opcodes.
+//===----------------------------------------------------------------------===//
+
+void ARMAsmPrinter::LowerSTACKMAP(MCStreamer &OutStreamer, StackMaps &SM,
+                                   const MachineInstr &MI) {
+  unsigned NumNOPBytes = StackMapOpers(&MI).getNumPatchBytes();
+
+  auto &Ctx = OutStreamer.getContext();
+  MCSymbol *MILabel = Ctx.createTempSymbol();
+  OutStreamer.emitLabel(MILabel);
+
+  SM.recordStackMap(*MILabel, MI);
+  // ARM NOP is 4 bytes; Thumb2 NOP (T2) is also 4 bytes (0xf3af8000).
+  // We use ARM NOP for simplicity.
+  assert(NumNOPBytes % 4 == 0 && "Invalid number of NOP bytes requested!");
+
+  // Scan ahead to trim the shadow.
+  const MachineBasicBlock &MBB = *MI.getParent();
+  MachineBasicBlock::const_iterator MII(MI);
+  ++MII;
+  while (NumNOPBytes > 0) {
+    if (MII == MBB.end() || MII->isCall() ||
+        MII->getOpcode() == ARM::DBG_VALUE ||
+        MII->getOpcode() == TargetOpcode::PATCHPOINT ||
+        MII->getOpcode() == TargetOpcode::STACKMAP)
+      break;
+    ++MII;
+    NumNOPBytes -= 4;
+  }
+
+  // Emit NOPs.
+  for (unsigned i = 0; i < NumNOPBytes; i += 4) {
+    if (MF->getSubtarget<ARMSubtarget>().isThumb2())
+      EmitToStreamer(OutStreamer, MCInstBuilder(ARM::t2NOP)
+                                     .addImm(ARMCC::AL)
+                                     .addReg(0));
+    else
+      EmitToStreamer(OutStreamer, MCInstBuilder(ARM::NOP)
+                                     .addImm(ARMCC::AL)
+                                     .addReg(0));
+  }
+}
+
+// Lower a patchpoint of the form:
+// [<def>], <id>, <numBytes>, <target>, <numArgs>
+void ARMAsmPrinter::LowerPATCHPOINT(MCStreamer &OutStreamer, StackMaps &SM,
+                                     const MachineInstr &MI) {
+  auto &Ctx = OutStreamer.getContext();
+  MCSymbol *MILabel = Ctx.createTempSymbol();
+  OutStreamer.emitLabel(MILabel);
+  SM.recordPatchPoint(*MILabel, MI);
+
+  PatchPointOpers Opers(&MI);
+  unsigned EncodedBytes = 0;
+  int64_t CallTarget = Opers.getCallTarget().getImm();
+
+  if (CallTarget) {
+    // Materialize address in scratch register (r12/IP) and BLX.
+    // We use MOVW+MOVT to load a 32-bit constant into R12.
+    Register ScratchReg = ARM::R12;
+    uint16_t Lo16 = CallTarget & 0xffff;
+    uint16_t Hi16 = (CallTarget >> 16) & 0xffff;
+    if (MF->getSubtarget<ARMSubtarget>().isThumb2()) {
+      EmitToStreamer(OutStreamer, MCInstBuilder(ARM::t2MOVi16)
+                                     .addReg(ScratchReg)
+                                     .addImm(Lo16)
+                                     .addImm(ARMCC::AL)
+                                     .addReg(0));
+      EmitToStreamer(OutStreamer, MCInstBuilder(ARM::t2MOVTi16)
+                                     .addReg(ScratchReg)
+                                     .addReg(ScratchReg)
+                                     .addImm(Hi16)
+                                     .addImm(ARMCC::AL)
+                                     .addReg(0));
+      EmitToStreamer(OutStreamer, MCInstBuilder(ARM::tBLXr)
+                                     .addImm(ARMCC::AL)
+                                     .addReg(0)
+                                     .addReg(ScratchReg));
+      EncodedBytes = 10; // 4 + 4 + 2 (BLXr in Thumb2 is 2 or 4 bytes; use 4+4+2=10)
+    } else {
+      EmitToStreamer(OutStreamer, MCInstBuilder(ARM::MOVi16)
+                                     .addReg(ScratchReg)
+                                     .addImm(Lo16)
+                                     .addImm(ARMCC::AL)
+                                     .addReg(0));
+      EmitToStreamer(OutStreamer, MCInstBuilder(ARM::MOVTi16)
+                                     .addReg(ScratchReg)
+                                     .addReg(ScratchReg)
+                                     .addImm(Hi16)
+                                     .addImm(ARMCC::AL)
+                                     .addReg(0));
+      EmitToStreamer(OutStreamer, MCInstBuilder(ARM::BLX)
+                                     .addReg(ScratchReg)
+                                     .addImm(ARMCC::AL)
+                                     .addReg(0));
+      EncodedBytes = 12; // 4 + 4 + 4
+    }
+  }
+
+  // Emit padding NOPs.
+  unsigned NumBytes = Opers.getNumPatchBytes();
+  assert(NumBytes >= EncodedBytes &&
+         "Patchpoint can't request size less than the length of a call.");
+  assert((NumBytes - EncodedBytes) % 4 == 0 &&
+         "Invalid number of NOP bytes requested!");
+  for (unsigned i = EncodedBytes; i < NumBytes; i += 4) {
+    if (MF->getSubtarget<ARMSubtarget>().isThumb2())
+      EmitToStreamer(OutStreamer, MCInstBuilder(ARM::t2NOP)
+                                     .addImm(ARMCC::AL)
+                                     .addReg(0));
+    else
+      EmitToStreamer(OutStreamer, MCInstBuilder(ARM::NOP)
+                                     .addImm(ARMCC::AL)
+                                     .addReg(0));
+  }
+}
+
+void ARMAsmPrinter::LowerSTATEPOINT(MCStreamer &OutStreamer, StackMaps &SM,
+                                     const MachineInstr &MI) {
+  StatepointOpers SOpers(&MI);
+  bool isThumb2 = MF->getSubtarget<ARMSubtarget>().isThumb2();
+
+  if (unsigned PatchBytes = SOpers.getNumPatchBytes()) {
+    assert(PatchBytes % 4 == 0 && "Invalid number of NOP bytes requested!");
+    for (unsigned i = 0; i < PatchBytes; i += 4) {
+      if (isThumb2)
+        EmitToStreamer(OutStreamer, MCInstBuilder(ARM::t2NOP)
+                                       .addImm(ARMCC::AL)
+                                       .addReg(0));
+      else
+        EmitToStreamer(OutStreamer, MCInstBuilder(ARM::NOP)
+                                       .addImm(ARMCC::AL)
+                                       .addReg(0));
+    }
+  } else {
+    // Lower the call target.
+    const MachineOperand &CallTarget = SOpers.getCallTarget();
+    MCOperand CallTargetMCOp;
+    unsigned CallOpcode;
+
+    switch (CallTarget.getType()) {
+    case MachineOperand::MO_GlobalAddress:
+    case MachineOperand::MO_ExternalSymbol:
+      lowerOperand(CallTarget, CallTargetMCOp);
+      CallOpcode = isThumb2 ? ARM::tBL : ARM::BL;
+      break;
+    case MachineOperand::MO_Immediate:
+      CallTargetMCOp = MCOperand::createImm(CallTarget.getImm());
+      CallOpcode = isThumb2 ? ARM::tBL : ARM::BL;
+      break;
+    case MachineOperand::MO_Register:
+      CallTargetMCOp = MCOperand::createReg(CallTarget.getReg());
+      CallOpcode = isThumb2 ? ARM::tBLXr : ARM::BLX;
+      break;
+    default:
+      llvm_unreachable("Unsupported operand type in statepoint call target");
+      break;
+    }
+
+    if (isThumb2) {
+      // Thumb2 BL/BLX require predicate operands
+      MCInst CallInst;
+      CallInst.setOpcode(CallOpcode);
+      if (CallOpcode == ARM::tBL) {
+        CallInst.addOperand(MCOperand::createImm(ARMCC::AL));
+        CallInst.addOperand(MCOperand::createReg(0));
+        CallInst.addOperand(CallTargetMCOp);
+      } else {
+        // tBLXr
+        CallInst.addOperand(MCOperand::createImm(ARMCC::AL));
+        CallInst.addOperand(MCOperand::createReg(0));
+        CallInst.addOperand(CallTargetMCOp);
+      }
+      EmitToStreamer(OutStreamer, CallInst);
+    } else {
+      // ARM32 BL/BLX
+      MCInst CallInst;
+      CallInst.setOpcode(CallOpcode);
+      if (CallOpcode == ARM::BL) {
+        CallInst.addOperand(CallTargetMCOp);
+        CallInst.addOperand(MCOperand::createImm(ARMCC::AL));
+        CallInst.addOperand(MCOperand::createReg(0));
+      } else {
+        // BLX (register form)
+        CallInst.addOperand(CallTargetMCOp);
+        CallInst.addOperand(MCOperand::createImm(ARMCC::AL));
+        CallInst.addOperand(MCOperand::createReg(0));
+      }
+      EmitToStreamer(OutStreamer, CallInst);
+    }
+  }
+
+  auto &Ctx = OutStreamer.getContext();
+  MCSymbol *MILabel = Ctx.createTempSymbol();
+  OutStreamer.emitLabel(MILabel);
+  SM.recordStatepoint(*MILabel, MI);
 }
 
 char ARMAsmPrinter::ID = 0;
