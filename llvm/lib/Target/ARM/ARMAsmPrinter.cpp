@@ -3011,13 +3011,9 @@ void ARMAsmPrinter::LowerSTACKMAP(MCStreamer &OutStreamer, StackMaps &SM,
   // Emit NOPs.
   for (unsigned i = 0; i < NumNOPBytes; i += 4) {
     if (MF->getSubtarget<ARMSubtarget>().isThumb2())
-      EmitToStreamer(OutStreamer, MCInstBuilder(ARM::t2NOP)
-                                     .addImm(ARMCC::AL)
-                                     .addReg(0));
+      OutStreamer.emitInt32(0xf3af8000); // Thumb2 NOP
     else
-      EmitToStreamer(OutStreamer, MCInstBuilder(ARM::NOP)
-                                     .addImm(ARMCC::AL)
-                                     .addReg(0));
+      OutStreamer.emitInt32(0xe320f000); // ARM NOP
   }
 }
 
@@ -3085,13 +3081,9 @@ void ARMAsmPrinter::LowerPATCHPOINT(MCStreamer &OutStreamer, StackMaps &SM,
          "Invalid number of NOP bytes requested!");
   for (unsigned i = EncodedBytes; i < NumBytes; i += 4) {
     if (MF->getSubtarget<ARMSubtarget>().isThumb2())
-      EmitToStreamer(OutStreamer, MCInstBuilder(ARM::t2NOP)
-                                     .addImm(ARMCC::AL)
-                                     .addReg(0));
+      OutStreamer.emitInt32(0xf3af8000); // Thumb2 NOP
     else
-      EmitToStreamer(OutStreamer, MCInstBuilder(ARM::NOP)
-                                     .addImm(ARMCC::AL)
-                                     .addReg(0));
+      OutStreamer.emitInt32(0xe320f000); // ARM NOP
   }
 }
 
@@ -3104,13 +3096,9 @@ void ARMAsmPrinter::LowerSTATEPOINT(MCStreamer &OutStreamer, StackMaps &SM,
     assert(PatchBytes % 4 == 0 && "Invalid number of NOP bytes requested!");
     for (unsigned i = 0; i < PatchBytes; i += 4) {
       if (isThumb2)
-        EmitToStreamer(OutStreamer, MCInstBuilder(ARM::t2NOP)
-                                       .addImm(ARMCC::AL)
-                                       .addReg(0));
+        OutStreamer.emitInt32(0xf3af8000); // Thumb2 NOP
       else
-        EmitToStreamer(OutStreamer, MCInstBuilder(ARM::NOP)
-                                       .addImm(ARMCC::AL)
-                                       .addReg(0));
+        OutStreamer.emitInt32(0xe320f000); // ARM NOP
     }
   } else {
     // Lower the call target.
