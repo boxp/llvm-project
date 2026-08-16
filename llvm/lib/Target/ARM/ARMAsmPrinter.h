@@ -124,6 +124,16 @@ public:
   // KCFI check lowering
   void LowerKCFI_CHECK(const MachineInstr &MI);
 
+  //===------------------------------------------------------------------===//
+  // Statepoint / StackMap / PatchPoint support (for GraalVM LLVM backend)
+  //===------------------------------------------------------------------===//
+  void LowerSTACKMAP(MCStreamer &OutStreamer, StackMaps &SM,
+                     const MachineInstr &MI);
+  void LowerPATCHPOINT(MCStreamer &OutStreamer, StackMaps &SM,
+                       const MachineInstr &MI);
+  void LowerSTATEPOINT(MCStreamer &OutStreamer, StackMaps &SM,
+                       const MachineInstr &MI);
+
 private:
   void EmitSled(const MachineInstr &MI, SledKind Kind);
 
