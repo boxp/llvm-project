@@ -19,6 +19,7 @@
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCObjectFileInfo.h"
@@ -598,7 +599,13 @@ void StackMaps::emitFunctionFrameRecords(MCStreamer &OS) {
     LLVM_DEBUG(dbgs() << WSMP << "function addr: " << FR.first
                       << " frame size: " << FR.second.StackSize
                       << " callsite count: " << FR.second.RecordCount << '\n');
-    OS.emitSymbolValue(FR.first, 8);
+    // The record always holds 64 bits; 32-bit targets lack a relocation that wide.
+    if (OS.getContext().getAsmInfo().getCodePointerSize() == 8) {
+      OS.emitSymbolValue(FR.first, 8);
+    } else {
+      OS.emitSymbolValue(FR.first, 4);
+      OS.emitInt32(0);
+    }
     OS.emitIntValue(FR.second.StackSize, 8);
     OS.emitIntValue(FR.second.RecordCount, 8);
   }

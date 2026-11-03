@@ -42,6 +42,7 @@
 #include "llvm/CodeGen/MultiHazardRecognizer.h"
 #include "llvm/CodeGen/ScoreboardHazardRecognizer.h"
 #include "llvm/CodeGen/SelectionDAGNodes.h"
+#include "llvm/CodeGen/StackMaps.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSchedule.h"
@@ -619,6 +620,15 @@ unsigned ARMBaseInstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
     return MCID.getSize();
   case TargetOpcode::BUNDLE:
     return getInstBundleSize(MI);
+  case TargetOpcode::STACKMAP:
+    return StackMapOpers(&MI).getNumPatchBytes();
+  case TargetOpcode::PATCHPOINT:
+    return PatchPointOpers(&MI).getNumPatchBytes();
+  case TargetOpcode::STATEPOINT: {
+    // A statepoint without patch bytes is lowered to a single call.
+    unsigned NumBytes = StatepointOpers(&MI).getNumPatchBytes();
+    return NumBytes ? NumBytes : 4;
+  }
   case TargetOpcode::COPY:
     if (!MF->getInfo<ARMFunctionInfo>()->isThumbFunction())
       return 4;

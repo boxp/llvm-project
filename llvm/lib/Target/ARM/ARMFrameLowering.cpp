@@ -2643,6 +2643,11 @@ static unsigned estimateRSStackSizeLimit(MachineFunction &MF,
           Limit = std::min(Limit, ((1U << 7) - 1) * 4);
           break;
         default:
+          // Stack maps and statepoints record the offset without encoding it.
+          if (MI.getOpcode() == TargetOpcode::STACKMAP ||
+              MI.getOpcode() == TargetOpcode::PATCHPOINT ||
+              MI.getOpcode() == TargetOpcode::STATEPOINT)
+            break;
           llvm_unreachable("Unhandled addressing mode in stack size limit calculation");
         }
         break; // At most one FI per instruction
@@ -2891,6 +2896,12 @@ void ARMFrameLowering::determineCalleeSaves(MachineFunction &MF,
         break;
       }
     } else {
+      // Spilling the Native Image thread and heap base registers just to pad
+      // the frame would restore them to stale values on return.
+      if (MF.getFunction().getCallingConv() == CallingConv::GRAAL &&
+          (Reg == ARM::R8 || Reg == ARM::R9))
+        continue;
+
       if (PushPopSplit != ARMSubtarget::SplitR7) {
         UnspilledCS1GPRs.push_back(Reg);
         continue;
