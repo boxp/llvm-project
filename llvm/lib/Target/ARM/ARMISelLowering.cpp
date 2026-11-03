@@ -1706,6 +1706,7 @@ ARMTargetLowering::getEffectiveCallingConv(CallingConv::ID CC,
     return isVarArg ? CallingConv::ARM_AAPCS : CallingConv::ARM_AAPCS_VFP;
   case CallingConv::C:
   case CallingConv::Tail:
+  case CallingConv::GRAAL:
     if (!getTM().isAAPCS_ABI())
       return CallingConv::ARM_APCS;
     else if (Subtarget->hasFPRegs() && !Subtarget->isThumb1Only() &&
@@ -6018,6 +6019,9 @@ Register ARMTargetLowering::getRegisterByName(const char* RegName, LLT VT,
                                               const MachineFunction &MF) const {
   return StringSwitch<Register>(RegName)
       .Case("sp", ARM::SP)
+      .Case("r13", ARM::SP)
+      .Case("r8", ARM::R8)
+      .Case("r9", ARM::R9)
       .Default(Register());
 }
 
@@ -12068,6 +12072,18 @@ ARMTargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
   DebugLoc dl = MI.getDebugLoc();
   bool isThumb2 = Subtarget->isThumb2();
   switch (MI.getOpcode()) {
+  case TargetOpcode::STATEPOINT:
+    // STATEPOINT has no implicit defs, but the call it is lowered to clobbers
+    // LR when it executes, earlier than any use is read.
+    MI.addOperand(*MI.getMF(),
+                  MachineOperand::CreateReg(ARM::LR, /*isDef*/ true,
+                                            /*isImp*/ true, /*isKill*/ false,
+                                            /*isDead*/ true, /*isUndef*/ false,
+                                            /*isEarlyClobber*/ true));
+    [[fallthrough]];
+  case TargetOpcode::STACKMAP:
+  case TargetOpcode::PATCHPOINT:
+    return emitPatchPoint(MI, BB);
   default: {
     MI.print(errs());
     llvm_unreachable("Unexpected instr type to insert");
@@ -21791,6 +21807,8 @@ Value *ARMTargetLowering::emitLoadLinked(IRBuilderBase &Builder, Type *ValueTy,
     Intrinsic::ID Int =
         IsAcquire ? Intrinsic::arm_ldaexd : Intrinsic::arm_ldrexd;
 
+    // ldrexd/ldaexd only accept default address space pointers.
+    Addr = Builder.CreateAddrSpaceCast(Addr, Builder.getPtrTy());
     Value *LoHi =
         Builder.CreateIntrinsic(Int, Addr, /*FMFSource=*/nullptr, "lohi");
 
@@ -21838,6 +21856,8 @@ Value *ARMTargetLowering::emitStoreConditional(IRBuilderBase &Builder,
     Value *Hi = Builder.CreateTrunc(Builder.CreateLShr(Val, 32), Int32Ty, "hi");
     if (!Subtarget->isLittle())
       std::swap(Lo, Hi);
+    // strexd/stlexd only accept default address space pointers.
+    Addr = Builder.CreateAddrSpaceCast(Addr, Builder.getPtrTy());
     return Builder.CreateIntrinsic(Int, {Lo, Hi, Addr});
   }
 

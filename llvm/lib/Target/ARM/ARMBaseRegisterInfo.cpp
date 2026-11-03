@@ -234,6 +234,11 @@ getReservedRegs(const MachineFunction &MF) const {
   markSuperRegs(Reserved, ARM::FPSCR);
   markSuperRegs(Reserved, ARM::FPSCR_RM);
   markSuperRegs(Reserved, ARM::APSR_NZCV);
+  // Native Image keeps the current thread in r9 and the heap base in r8.
+  if (MF.getFunction().getCallingConv() == CallingConv::GRAAL) {
+    markSuperRegs(Reserved, ARM::R8);
+    markSuperRegs(Reserved, ARM::R9);
+  }
   if (TFI->isFPReserved(MF))
     markSuperRegs(Reserved, STI.getFramePointerReg());
   if (hasBasePointer(MF))
@@ -848,6 +853,16 @@ ARMBaseRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
   Register FrameReg;
 
   int Offset = TFI->ResolveFrameIndexReference(MF, FrameIndex, FrameReg, SPAdj);
+
+  // Stack maps record <reg, offset> locations that are never encoded.
+  if (MI.getOpcode() == TargetOpcode::STACKMAP ||
+      MI.getOpcode() == TargetOpcode::PATCHPOINT ||
+      MI.getOpcode() == TargetOpcode::STATEPOINT) {
+    Offset += MI.getOperand(FIOperandNum + 1).getImm();
+    MI.getOperand(FIOperandNum).ChangeToRegister(FrameReg, /*isDef=*/false);
+    MI.getOperand(FIOperandNum + 1).ChangeToImmediate(Offset);
+    return false;
+  }
 
   if (MI.getOpcode() == TargetOpcode::LOCAL_ESCAPE) {
     MachineOperand &FI = MI.getOperand(FIOperandNum);

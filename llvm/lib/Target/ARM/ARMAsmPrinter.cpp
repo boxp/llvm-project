@@ -3144,16 +3144,8 @@ void ARMAsmPrinter::LowerSTATEPOINT(MCStreamer &OutStreamer, StackMaps &SM,
       // ARM32 BL/BLX
       MCInst CallInst;
       CallInst.setOpcode(CallOpcode);
-      if (CallOpcode == ARM::BL) {
-        CallInst.addOperand(CallTargetMCOp);
-        CallInst.addOperand(MCOperand::createImm(ARMCC::AL));
-        CallInst.addOperand(MCOperand::createReg(0));
-      } else {
-        // BLX (register form)
-        CallInst.addOperand(CallTargetMCOp);
-        CallInst.addOperand(MCOperand::createImm(ARMCC::AL));
-        CallInst.addOperand(MCOperand::createReg(0));
-      }
+      // BL and BLX (register form) have no predicate operands.
+      CallInst.addOperand(CallTargetMCOp);
       EmitToStreamer(OutStreamer, CallInst);
     }
   }
